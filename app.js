@@ -8,57 +8,15 @@
     return Math.round(value * factor) / factor;
   }
 
-  function countEventsInWindow(eventTimes, windowMs = POLLING_WINDOW_MS, nowMs) {
-    if (!Array.isArray(eventTimes) || !eventTimes.length) return 0;
-    if (!Number.isFinite(windowMs) || windowMs <= 0) return eventTimes.length;
-    const endMs = Number.isFinite(nowMs) ? nowMs : eventTimes[eventTimes.length - 1];
-    const cutoff = endMs - windowMs;
-    let count = 0;
-    for (let index = eventTimes.length - 1; index >= 0; index -= 1) {
-      if (eventTimes[index] < cutoff) break;
-      count += 1;
-    }
-    return count;
-  }
-
-  function pruneEventTimes(eventTimes, windowMs = POLLING_WINDOW_MS, nowMs) {
-    if (!Array.isArray(eventTimes) || !eventTimes.length) return [];
-    if (!Number.isFinite(windowMs) || windowMs <= 0) return [...eventTimes];
-    const endMs = Number.isFinite(nowMs) ? nowMs : eventTimes[eventTimes.length - 1];
-    const cutoff = endMs - windowMs;
-    let startIndex = 0;
-    while (startIndex < eventTimes.length && eventTimes[startIndex] < cutoff) {
-      startIndex += 1;
-    }
-    return startIndex > 0 ? eventTimes.slice(startIndex) : eventTimes;
+  function computePollingRateHzFromCount(eventCount, timeDeltaMs) {
+    const count = Number.isFinite(eventCount) ? Math.max(0, Math.floor(eventCount)) : 0;
+    const deltaMs = Number.isFinite(timeDeltaMs) ? timeDeltaMs : 0;
+    if (deltaMs <= 0 || count === 0) return 0;
+    return roundNumber((count * 1000) / deltaMs);
   }
 
   function updatePeakHz(peakHz, currentHz) {
     return Math.max(peakHz, roundNumber(currentHz));
-  }
-
-  function computePollingRateHz(eventTimes, windowMs = POLLING_WINDOW_MS, nowMs) {
-    const count = countEventsInWindow(eventTimes, windowMs, nowMs);
-    if (!Number.isFinite(windowMs) || windowMs <= 0) return 0;
-    return roundNumber((count * 1000) / windowMs);
-  }
-
-  function expandMovementSamples(event, nowMs = performance.now()) {
-    const coalesced = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
-    const events = coalesced.length ? coalesced : [event];
-    const baseTimeStamp = Number.isFinite(event.timeStamp) ? event.timeStamp : nowMs;
-
-    return events
-      .filter(shouldAcceptMovementSample)
-      .map((movementEvent) => {
-        const eventTimeStamp = Number.isFinite(movementEvent.timeStamp) ? movementEvent.timeStamp : baseTimeStamp;
-        return {
-          time: nowMs + (eventTimeStamp - baseTimeStamp),
-          dx: Number.isFinite(movementEvent.movementX) ? movementEvent.movementX : 0,
-          dy: Number.isFinite(movementEvent.movementY) ? movementEvent.movementY : 0,
-          source: event.type,
-        };
-      });
   }
 
   function shouldAcceptMovementSample(event) {
@@ -77,11 +35,8 @@
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
-      countEventsInWindow,
-      pruneEventTimes,
-      computePollingRateHz,
+      computePollingRateHzFromCount,
       updatePeakHz,
-      expandMovementSamples,
       shouldAcceptMovementSample,
       createSessionState,
       POLLING_WINDOW_MS,
@@ -92,7 +47,8 @@
 
   const state = {
     running: false,
-    eventTimes: [],
+    windowEventCount: 0,
+    lastTickMs: 0,
     usingPointerLock: false,
     eventName: 'mousemove',
     activeSource: '',
@@ -170,7 +126,8 @@
 
   function resetSession() {
     stopStatsTimer();
-    state.eventTimes = [];
+    state.windowEventCount = 0;
+    state.lastTickMs = 0;
     state.activeSource = '';
     state.session = createSessionState();
     render();
@@ -178,6 +135,7 @@
 
   function startStatsTimer() {
     stopStatsTimer();
+    state.lastTickMs = 0;
     state.statsTimerId = window.setInterval(tickStats, getSampleWindowMs());
   }
 
@@ -190,10 +148,14 @@
   function tickStats() {
     if (!state.running || !state.usingPointerLock) return;
 
-    const windowMs = getSampleWindowMs();
+    const timerMs = getSampleWindowMs();
     const nowMs = performance.now();
-    state.eventTimes = pruneEventTimes(state.eventTimes, windowMs, nowMs);
-    const currentHz = computePollingRateHz(state.eventTimes, windowMs, nowMs);
+    const timeDeltaMs = state.lastTickMs > 0 ? nowMs - state.lastTickMs : timerMs;
+    if (timeDeltaMs <= 0) return;
+
+    const currentHz = computePollingRateHzFromCount(state.windowEventCount, timeDeltaMs);
+    state.windowEventCount = 0;
+    state.lastTickMs = nowMs;
 
     state.session.currentHz = currentHz;
     state.session.peakHz = updatePeakHz(state.session.peakHz, currentHz);
@@ -242,7 +204,7 @@
       elements.zone.classList.remove('is-active');
       elements.status.textContent = state.session.totalEventCount > 0 ? '测试已结束' : '已暂停';
 
-      if (state.eventTimes.length) {
+      if (state.windowEventCount > 0) {
         tickStats();
       } else {
         render();
@@ -262,13 +224,8 @@
       state.activeSource = 'mousemove';
     }
 
-    const acceptedSamples = expandMovementSamples(event, performance.now());
-    if (!acceptedSamples.length) return;
-
-    acceptedSamples.forEach((sample) => {
-      state.eventTimes.push(sample.time);
-    });
-    state.session.totalEventCount += acceptedSamples.length;
+    state.windowEventCount += 1;
+    state.session.totalEventCount += 1;
   }
 
   function render() {
@@ -306,11 +263,8 @@
   }
 
   globalScope.MousePollingStats = {
-    countEventsInWindow,
-    pruneEventTimes,
-    computePollingRateHz,
+    computePollingRateHzFromCount,
     updatePeakHz,
-    expandMovementSamples,
     shouldAcceptMovementSample,
     createSessionState,
     POLLING_WINDOW_MS,
