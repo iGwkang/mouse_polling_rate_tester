@@ -1,6 +1,6 @@
 (function (globalScope) {
-  const DEFAULT_SAMPLE_RETENTION_MS = 10000;
-  const DEFAULT_SAMPLE_WINDOW_MS = 1000;
+  const POLLING_WINDOW_MS = 500;
+  const TICK_INTERVAL_MS = 500;
 
   function roundNumber(value, digits = 0) {
     if (!Number.isFinite(value)) return 0;
@@ -8,75 +8,39 @@
     return Math.round(value * factor) / factor;
   }
 
-  function clampSamples(samples, retentionMs = DEFAULT_SAMPLE_RETENTION_MS) {
-    if (!Array.isArray(samples) || !samples.length) return [];
-    if (!Number.isFinite(retentionMs) || retentionMs <= 0) return [...samples];
-    const latestTime = samples[samples.length - 1].time;
-    const cutoff = latestTime - retentionMs;
-    return samples.filter((sample) => sample.time >= cutoff);
-  }
-
-  function computePollingStats(samples, options = {}) {
-    const sampleWindowMs = Number.isFinite(options.sampleWindowMs)
-      ? options.sampleWindowMs
-      : DEFAULT_SAMPLE_WINDOW_MS;
-    const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : undefined;
-    const limited = clampSamples(samples, options.retentionMs);
-    const eventCount = limited.length;
-    const windowRates = buildSlidingWindowRates(limited, sampleWindowMs);
-    const latestHz = computeSlidingWindowHz(limited, sampleWindowMs, nowMs);
-
-    return {
-      eventCount,
-      validIntervals: eventCount,
-      rejectedIntervals: 0,
-      windowCount: windowRates.length,
-      latestHz: roundNumber(latestHz),
-      peakHz: roundNumber(windowRates.length ? Math.max(...windowRates) : 0),
-      rates: windowRates,
-    };
-  }
-
-  function buildWindowRates(samples, sampleWindowMs = DEFAULT_SAMPLE_WINDOW_MS) {
-    if (!samples.length || sampleWindowMs <= 0) return [];
-    const sorted = [...samples].sort((left, right) => left.time - right.time);
-    const firstTime = sorted[0].time;
-    const windows = new Map();
-
-    sorted.forEach((sample) => {
-      const windowIndex = Math.floor((sample.time - firstTime) / sampleWindowMs);
-      windows.set(windowIndex, (windows.get(windowIndex) || 0) + 1);
-    });
-
-    return [...windows.keys()]
-      .sort((left, right) => left - right)
-      .map((windowIndex) => roundNumber((windows.get(windowIndex) * 1000) / sampleWindowMs));
-  }
-
-  function buildSlidingWindowRates(samples, sampleWindowMs = DEFAULT_SAMPLE_WINDOW_MS) {
-    if (!samples.length || sampleWindowMs <= 0) return [];
-    const sorted = [...samples].sort((left, right) => left.time - right.time);
-    const rates = [];
-    let startIndex = 0;
-
-    for (let endIndex = 0; endIndex < sorted.length; endIndex += 1) {
-      const endTime = sorted[endIndex].time;
-      const startTime = endTime - sampleWindowMs;
-      while (sorted[startIndex].time <= startTime && startIndex < endIndex) {
-        startIndex += 1;
-      }
-      rates.push(((endIndex - startIndex + 1) * 1000) / sampleWindowMs);
+  function countEventsInWindow(eventTimes, windowMs = POLLING_WINDOW_MS, nowMs) {
+    if (!Array.isArray(eventTimes) || !eventTimes.length) return 0;
+    if (!Number.isFinite(windowMs) || windowMs <= 0) return eventTimes.length;
+    const endMs = Number.isFinite(nowMs) ? nowMs : eventTimes[eventTimes.length - 1];
+    const cutoff = endMs - windowMs;
+    let count = 0;
+    for (let index = eventTimes.length - 1; index >= 0; index -= 1) {
+      if (eventTimes[index] < cutoff) break;
+      count += 1;
     }
-
-    return rates.map((rate) => roundNumber(rate));
+    return count;
   }
 
-  function computeSlidingWindowHz(samples, sampleWindowMs = DEFAULT_SAMPLE_WINDOW_MS, nowMs) {
-    if (!samples.length || sampleWindowMs <= 0) return 0;
-    const endTime = Number.isFinite(nowMs) ? nowMs : samples[samples.length - 1].time;
-    const startTime = endTime - sampleWindowMs;
-    const count = samples.filter((sample) => sample.time > startTime && sample.time <= endTime).length;
-    return (count * 1000) / sampleWindowMs;
+  function pruneEventTimes(eventTimes, windowMs = POLLING_WINDOW_MS, nowMs) {
+    if (!Array.isArray(eventTimes) || !eventTimes.length) return [];
+    if (!Number.isFinite(windowMs) || windowMs <= 0) return [...eventTimes];
+    const endMs = Number.isFinite(nowMs) ? nowMs : eventTimes[eventTimes.length - 1];
+    const cutoff = endMs - windowMs;
+    let startIndex = 0;
+    while (startIndex < eventTimes.length && eventTimes[startIndex] < cutoff) {
+      startIndex += 1;
+    }
+    return startIndex > 0 ? eventTimes.slice(startIndex) : eventTimes;
+  }
+
+  function updatePeakHz(peakHz, currentHz) {
+    return Math.max(peakHz, roundNumber(currentHz));
+  }
+
+  function computePollingRateHz(eventTimes, windowMs = POLLING_WINDOW_MS, nowMs) {
+    const count = countEventsInWindow(eventTimes, windowMs, nowMs);
+    if (!Number.isFinite(windowMs) || windowMs <= 0) return 0;
+    return roundNumber((count * 1000) / windowMs);
   }
 
   function expandMovementSamples(event, nowMs = performance.now()) {
@@ -103,61 +67,37 @@
     return dx !== 0 || dy !== 0;
   }
 
-  function shouldRefreshLatestReading(nowMs, lastRefreshMs, intervalMs) {
-    return nowMs - lastRefreshMs >= intervalMs;
-  }
-
-  function createSessionCounters() {
+  function createSessionState() {
     return {
       totalEventCount: 0,
-      statPointCount: 0,
+      currentHz: 0,
       peakHz: 0,
-    };
-  }
-
-  function updateSessionCounters(counters, acceptedSampleCount) {
-    const count = Number.isFinite(acceptedSampleCount) ? Math.max(0, Math.floor(acceptedSampleCount)) : 0;
-    return {
-      ...counters,
-      totalEventCount: counters.totalEventCount + count,
-      statPointCount: counters.statPointCount + count,
-    };
-  }
-
-  function updateSessionPeak(counters, latestHz) {
-    return {
-      ...counters,
-      peakHz: Math.max(counters.peakHz, roundNumber(latestHz)),
     };
   }
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
-      computePollingStats,
-      buildWindowRates,
-      buildSlidingWindowRates,
-      computeSlidingWindowHz,
-      createSessionCounters,
+      countEventsInWindow,
+      pruneEventTimes,
+      computePollingRateHz,
+      updatePeakHz,
       expandMovementSamples,
       shouldAcceptMovementSample,
-      shouldRefreshLatestReading,
-      updateSessionCounters,
-      updateSessionPeak,
+      createSessionState,
+      POLLING_WINDOW_MS,
+      TICK_INTERVAL_MS,
     };
     return;
   }
 
   const state = {
     running: false,
-    samples: [],
+    eventTimes: [],
     usingPointerLock: false,
     eventName: 'mousemove',
     activeSource: '',
-    frameId: 0,
-    displayedLatestHz: 0,
-    lastLatestRefreshMs: 0,
-    latestRefreshIntervalMs: 250,
-    counters: createSessionCounters(),
+    statsTimerId: 0,
+    session: createSessionState(),
   };
 
   function getElements() {
@@ -165,15 +105,14 @@
       zone: document.querySelector('[data-test-zone]'),
       startButton: document.querySelector('[data-start]'),
       resetButton: document.querySelector('[data-reset]'),
-      sampleLimit: document.querySelector('[data-sample-limit]'),
       status: document.querySelector('[data-status]'),
       source: document.querySelector('[data-source]'),
       support: document.querySelector('[data-support]'),
       latestHz: document.querySelector('[data-latest-hz]'),
       peakHz: document.querySelector('[data-peak-hz]'),
       eventCount: document.querySelector('[data-event-count]'),
+      sampleLimit: document.querySelector('[data-sample-limit]'),
       windowSize: document.querySelector('[data-window-size]'),
-      windowCount: document.querySelector('[data-window-count]'),
     };
   }
 
@@ -193,6 +132,11 @@
 
   function formatSeconds(ms) {
     return `${(ms / 1000).toLocaleString('zh-CN')} s`;
+  }
+
+  function getSampleWindowMs() {
+    const value = Number(getElements().sampleLimit.value);
+    return Number.isFinite(value) && value > 0 ? value : POLLING_WINDOW_MS;
   }
 
   function setRunning(nextRunning) {
@@ -224,13 +168,47 @@
     }
   }
 
-  function resetSamples() {
-    state.samples = [];
-    state.displayedLatestHz = 0;
-    state.lastLatestRefreshMs = 0;
+  function resetSession() {
+    stopStatsTimer();
+    state.eventTimes = [];
     state.activeSource = '';
-    state.counters = createSessionCounters();
+    state.session = createSessionState();
     render();
+  }
+
+  function startStatsTimer() {
+    stopStatsTimer();
+    state.statsTimerId = window.setInterval(tickStats, getSampleWindowMs());
+  }
+
+  function stopStatsTimer() {
+    if (!state.statsTimerId) return;
+    window.clearInterval(state.statsTimerId);
+    state.statsTimerId = 0;
+  }
+
+  function tickStats() {
+    if (!state.running || !state.usingPointerLock) return;
+
+    const windowMs = getSampleWindowMs();
+    const nowMs = performance.now();
+    state.eventTimes = pruneEventTimes(state.eventTimes, windowMs, nowMs);
+    const currentHz = computePollingRateHz(state.eventTimes, windowMs, nowMs);
+
+    state.session.currentHz = currentHz;
+    state.session.peakHz = updatePeakHz(state.session.peakHz, currentHz);
+    render();
+  }
+
+  function onSampleLimitChange() {
+    if (state.statsTimerId) {
+      startStatsTimer();
+    }
+    if (state.running && state.usingPointerLock) {
+      tickStats();
+    } else {
+      render();
+    }
   }
 
   function beginLockedTest() {
@@ -239,7 +217,6 @@
       setRunning(false);
       return;
     }
-    resetSamples();
     elements.status.textContent = '正在进入相对移动模式';
     requestPointerLock(elements.zone);
   }
@@ -248,27 +225,33 @@
     const elements = getElements();
     state.usingPointerLock = document.pointerLockElement === elements.zone;
     elements.zone.classList.toggle('is-locked', state.usingPointerLock);
+
     if (state.usingPointerLock) {
+      resetSession();
       state.running = true;
       elements.startButton.textContent = '停止测试';
       elements.startButton.setAttribute('aria-pressed', 'true');
       elements.zone.classList.add('is-active');
       elements.status.textContent = '相对移动采样中';
+      startStatsTimer();
     } else {
+      stopStatsTimer();
       state.running = false;
       elements.startButton.textContent = '开始测试';
       elements.startButton.setAttribute('aria-pressed', 'false');
       elements.zone.classList.remove('is-active');
-      elements.status.textContent = state.samples.length > 1 ? '测试已结束' : '已暂停';
-      render(true);
+      elements.status.textContent = state.session.totalEventCount > 0 ? '测试已结束' : '已暂停';
+
+      if (state.eventTimes.length) {
+        tickStats();
+      } else {
+        render();
+      }
     }
   }
 
   function pushSample(event) {
     if (!state.running || !state.usingPointerLock) return;
-    const dx = Number.isFinite(event.movementX) ? event.movementX : 0;
-    const dy = Number.isFinite(event.movementY) ? event.movementY : 0;
-
     if (!shouldAcceptMovementSample(event)) return;
 
     if (event.type === 'pointerrawupdate') {
@@ -282,40 +265,21 @@
     const acceptedSamples = expandMovementSamples(event, performance.now());
     if (!acceptedSamples.length) return;
 
-    state.samples.push(...acceptedSamples);
-    state.samples = clampSamples(state.samples, DEFAULT_SAMPLE_RETENTION_MS);
-    state.counters = updateSessionCounters(state.counters, acceptedSamples.length);
-
-    scheduleRender();
-  }
-
-  function scheduleRender() {
-    if (state.frameId) return;
-    state.frameId = requestAnimationFrame(() => {
-      state.frameId = 0;
-      render(false);
+    acceptedSamples.forEach((sample) => {
+      state.eventTimes.push(sample.time);
     });
+    state.session.totalEventCount += acceptedSamples.length;
   }
 
-  function render(forceLatest = false) {
+  function render() {
     const elements = getElements();
-    const sampleWindowMs = Number(elements.sampleLimit.value);
-    const nowMs = performance.now();
-    const stats = computePollingStats(state.samples, { sampleWindowMs, nowMs });
-    state.counters = updateSessionPeak(state.counters, Math.max(stats.latestHz, stats.peakHz));
-
-    if (forceLatest || shouldRefreshLatestReading(nowMs, state.lastLatestRefreshMs, state.latestRefreshIntervalMs)) {
-      state.displayedLatestHz = stats.latestHz;
-      state.lastLatestRefreshMs = nowMs;
-    }
 
     elements.source.textContent = state.activeSource || state.eventName;
     elements.support.textContent = describeSupport();
-    elements.latestHz.textContent = formatHz(state.displayedLatestHz);
-    elements.peakHz.textContent = formatHz(state.counters.peakHz);
-    elements.eventCount.textContent = state.counters.totalEventCount.toLocaleString('zh-CN');
-    elements.windowSize.textContent = formatSeconds(sampleWindowMs);
-    elements.windowCount.textContent = state.counters.statPointCount.toLocaleString('zh-CN');
+    elements.latestHz.textContent = formatHz(state.session.currentHz);
+    elements.peakHz.textContent = formatHz(state.session.peakHz);
+    elements.eventCount.textContent = state.session.totalEventCount.toLocaleString('zh-CN');
+    elements.windowSize.textContent = formatSeconds(getSampleWindowMs());
   }
 
   function bindApp() {
@@ -323,8 +287,8 @@
     state.eventName = detectEventName();
 
     elements.startButton.addEventListener('click', beginLockedTest);
-    elements.resetButton.addEventListener('click', resetSamples);
-    elements.sampleLimit.addEventListener('change', render);
+    elements.resetButton.addEventListener('click', resetSession);
+    elements.sampleLimit.addEventListener('change', onSampleLimitChange);
     elements.zone.addEventListener('click', beginLockedTest);
     window.addEventListener('mousemove', pushSample, { passive: true });
     if (state.eventName === 'pointerrawupdate') {
@@ -342,15 +306,14 @@
   }
 
   globalScope.MousePollingStats = {
-    computePollingStats,
-    buildWindowRates,
-    buildSlidingWindowRates,
-    computeSlidingWindowHz,
-    createSessionCounters,
+    countEventsInWindow,
+    pruneEventTimes,
+    computePollingRateHz,
+    updatePeakHz,
     expandMovementSamples,
     shouldAcceptMovementSample,
-    shouldRefreshLatestReading,
-    updateSessionCounters,
-    updateSessionPeak,
+    createSessionState,
+    POLLING_WINDOW_MS,
+    TICK_INTERVAL_MS,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
