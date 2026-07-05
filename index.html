@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="浏览器鼠标回报率测试工具，使用 pointerrawupdate 或 mousemove 统计事件间隔。">
+    <title>鼠标回报率测试</title>
+    <link rel="stylesheet" href="./styles.css?v=20260705-ui1">
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel panel--hero">
+        <div class="title-row">
+          <div>
+            <p class="eyebrow">Mouse Polling Rate Tester</p>
+            <h1>鼠标回报率测试</h1>
+          </div>
+          <div class="status-pill" data-status>已暂停</div>
+        </div>
+
+        <div class="meter-grid" aria-label="测试结果">
+          <div class="meter meter--primary">
+            <span class="meter__label">当前回报率</span>
+            <strong data-latest-hz>-- Hz</strong>
+          </div>
+          <div class="meter">
+            <span class="meter__label">峰值</span>
+            <strong data-peak-hz>-- Hz</strong>
+          </div>
+        </div>
+
+        <div class="controls" aria-label="测试控制">
+          <button class="button button--primary" type="button" data-start aria-pressed="false">开始测试</button>
+          <button class="button" type="button" data-reset>重置</button>
+          <label class="select-label">
+            统计窗口
+            <select data-sample-limit>
+              <option value="500">0.5 s</option>
+              <option value="1000" selected>1 s</option>
+              <option value="2000">2 s</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="test-surface" data-test-zone>
+        <div class="surface-copy">
+          <h2>点击进入测试模式</h2>
+          <p>进入后会隐藏鼠标并使用相对移动采样。移动鼠标进行测试，再次点击或按 Esc 结束。</p>
+        </div>
+      </section>
+
+      <section class="dashboard">
+        <div class="panel">
+          <h2>采样详情</h2>
+          <dl class="details">
+            <div>
+              <dt>事件源</dt>
+              <dd data-source>--</dd>
+            </div>
+            <div>
+              <dt>支持状态</dt>
+              <dd data-support>--</dd>
+            </div>
+            <div>
+              <dt>总事件数</dt>
+              <dd data-event-count>0</dd>
+            </div>
+            <div>
+              <dt>统计窗口</dt>
+              <dd data-window-size>1 s</dd>
+            </div>
+            <div>
+              <dt>总统计点数</dt>
+              <dd data-window-count>0</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+    </main>
+    <script src="./app.js?v=20260705-count1"></script>
+  </body>
+</html>
